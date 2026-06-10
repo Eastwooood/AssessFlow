@@ -38,18 +38,18 @@ public class ExamFlowIntegrationTest {
     @DisplayName("1. 开考：创建考试会话")
     void testStartExam() {
         System.out.println("\n========== [步骤1] 开始开考 ==========");
-        
+
         SessionVO vo = examSessionService.startExam(testUserId, testPaperId);
-        
+
         Assertions.assertNotNull(vo, "会话不应为空");
         Assertions.assertNotNull(vo.getSessionId(), "会话ID应生成");
         currentSessionId = vo.getSessionId();
-        
-        Assertions.assertEquals("AWAIT_ANSWER", vo.getStatus(), 
+
+        Assertions.assertEquals("AWAIT_ANSWER", vo.getStatus(),
                 "开考后应进入等待作答状态");
         Assertions.assertNotNull(vo.getPendingStep(), "应有待作答环节");
         Assertions.assertNotNull(vo.getProgress(), "应有进度信息");
-        
+
         System.out.println("✅ 开考成功！");
         System.out.println("   会话ID: " + currentSessionId);
         System.out.println("   状态: " + vo.getStatus());
@@ -65,7 +65,7 @@ public class ExamFlowIntegrationTest {
     void testSubmitAnswer1() {
         System.out.println("\n========== [步骤2] 答第1题（单选）==========");
         
-        SessionVO beforeVo = examSessionService.getSessionSnapshot(currentSessionId);
+        SessionVO beforeVo = examSessionService.getSessionSnapshot(currentSessionId, testUserId);
         System.out.println("   答题前 - 题型: " + beforeVo.getPendingStep().getType()
                 + ", 游标: " + beforeVo.getStepCursor());
 
@@ -76,12 +76,12 @@ public class ExamFlowIntegrationTest {
                 .chosen(List.of(options.get(0).getOptionId()))  // 选第一个选项（可能对也可能错）
                 .build();
         
-        SessionVO afterVo = examSessionService.submitAnswer(currentSessionId, request);
-        
-        Assertions.assertEquals("AWAIT_ANSWER", afterVo.getStatus(), 
+        SessionVO afterVo = examSessionService.submitAnswer(currentSessionId, request, testUserId);
+
+        Assertions.assertEquals("AWAIT_ANSWER", afterVo.getStatus(),
                 "答题后应继续等待下一题");
         Assertions.assertTrue(afterVo.getTotalScore() >= 0, "总分应为非负数");
-        
+
         System.out.println("✅ 第1题提交完成！");
         System.out.println("   当前总分: " + afterVo.getTotalScore());
         System.out.println("   下一题型: " + (afterVo.getPendingStep() != null ? afterVo.getPendingStep().getType() : "无"));
@@ -93,8 +93,8 @@ public class ExamFlowIntegrationTest {
     @DisplayName("3. 答第2题：单选题")
     void testSubmitAnswer2() {
         System.out.println("\n========== [步骤3] 答第2题（单选）==========");
-        
-        SessionVO beforeVo = examSessionService.getSessionSnapshot(currentSessionId);
+
+        SessionVO beforeVo = examSessionService.getSessionSnapshot(currentSessionId, testUserId);
         Assertions.assertNotNull(beforeVo.getPendingStep(), "应有待作答环节");
 
         List<SessionVO.PendingStep.OptionVO> options = beforeVo.getPendingStep().getOptions();
@@ -103,7 +103,7 @@ public class ExamFlowIntegrationTest {
                 .chosen(List.of(options.get(0).getOptionId()))
                 .build();
 
-        SessionVO afterVo = examSessionService.submitAnswer(currentSessionId, request);
+        SessionVO afterVo = examSessionService.submitAnswer(currentSessionId, request, testUserId);
 
         System.out.println("✅ 第2题提交完成！当前总分: " + afterVo.getTotalScore());
     }
@@ -114,7 +114,7 @@ public class ExamFlowIntegrationTest {
     void testSubmitAnswer3() {
         System.out.println("\n========== [步骤4] 答第3题（单选）==========");
 
-        SessionVO beforeVo = examSessionService.getSessionSnapshot(currentSessionId);
+        SessionVO beforeVo = examSessionService.getSessionSnapshot(currentSessionId, testUserId);
         Assertions.assertNotNull(beforeVo.getPendingStep(), "应有待作答环节");
 
         List<SessionVO.PendingStep.OptionVO> options = beforeVo.getPendingStep().getOptions();
@@ -123,7 +123,7 @@ public class ExamFlowIntegrationTest {
                 .chosen(List.of(options.get(0).getOptionId()))
                 .build();
 
-        SessionVO afterVo = examSessionService.submitAnswer(currentSessionId, request);
+        SessionVO afterVo = examSessionService.submitAnswer(currentSessionId, request, testUserId);
 
         System.out.println("✅ 第3题提交完成！当前总分: " + afterVo.getTotalScore());
     }
@@ -134,7 +134,7 @@ public class ExamFlowIntegrationTest {
     void testResumeFromSnapshot() {
         System.out.println("\n========== [步骤5] 模拟断线续考 ==========");
 
-        SessionVO snapshot = examSessionService.getSessionSnapshot(currentSessionId);
+        SessionVO snapshot = examSessionService.getSessionSnapshot(currentSessionId, testUserId);
 
         Assertions.assertNotNull(snapshot, "快照不应为空");
         Assertions.assertNotNull(snapshot.getPendingStep(), "应有待恢复的作答环节");
@@ -215,25 +215,26 @@ public class ExamFlowIntegrationTest {
     @DisplayName("8. 异常场景：重复提交拦截")
     void testDuplicateSubmitPrevention() {
         System.out.println("\n========== [步骤8] 测试异常场景 ==========");
-        
+
         // 创建新会话用于测试异常场景
-        SessionVO newVo = examSessionService.startExam(testUserId + 1L, testPaperId);
+        Long testUser2 = testUserId + 1L;
+        SessionVO newVo = examSessionService.startExam(testUser2, testPaperId);
         Long newSessionId = newVo.getSessionId();
-        
+
         // 正常提交一次
         SubmitAnswerRequest request = SubmitAnswerRequest.builder()
                 .type(newVo.getPendingStep().getType())
                 .chosen(List.of(newVo.getPendingStep().getOptions().get(0).getOptionId()))
                 .build();
-        examSessionService.submitAnswer(newSessionId, request);
+        examSessionService.submitAnswer(newSessionId, request, testUser2);
 
         // 尝试提交错误题型（应被拒绝）
         try {
             SubmitAnswerRequest wrongTypeRequest = SubmitAnswerRequest.builder()
-                    .type("MULTI")  # 故意传错题型
+                    .type("MULTI")  // 故意传错题型
                     .chosen(List.of(1L, 2L))
                     .build();
-            examSessionService.submitAnswer(newSessionId, wrongTypeRequest);
+            examSessionService.submitAnswer(newSessionId, wrongTypeRequest, testUser2);
             Assertions.fail("应该抛出业务异常");
         } catch (Exception e) {
             System.out.println("✅ 成功拦截错误题型提交: " + e.getMessage());
@@ -242,5 +243,40 @@ public class ExamFlowIntegrationTest {
         // GM强制结束这个测试会话
         examSessionService.gmForceFinish(newSessionId);
         System.out.println("✅ 异常场景测试通过！");
+    }
+
+    @Test
+    @Order(9)
+    @DisplayName("9. 即时roll：自适应环节进环节再抽题")
+    void testAdaptiveImmediateRoll() {
+        System.out.println("\n========== [步骤9] 即时roll自适应抽题 ==========");
+
+        Long testUser3 = testUserId + 2L;
+        Long adaptivePaperId = 2L;
+        SessionVO vo = examSessionService.startExam(testUser3, adaptivePaperId);
+
+        // 推进到自适应单选环节，应即时抽题成功
+        Assertions.assertEquals("AWAIT_ANSWER", vo.getStatus());
+        Assertions.assertNotNull(vo.getPendingStep(), "自适应环节应有待作答题");
+        Assertions.assertEquals("SINGLE", vo.getPendingStep().getType());
+        Assertions.assertNotNull(vo.getPendingStep().getQuestionId(), "即时roll应已分配题目");
+        Assertions.assertFalse(vo.getPendingStep().getOptions().isEmpty(), "应有候选选项");
+
+        System.out.println("✅ 即时roll抽题成功！题目ID: " + vo.getPendingStep().getQuestionId());
+        System.out.println("   题干: " + vo.getPendingStep().getStem());
+        System.out.println("   选项数: " + vo.getPendingStep().getOptions().size());
+
+        // 作答后应推进过 SCORE_SNAPSHOT 自动结算并 FINISHED
+        SubmitAnswerRequest req = SubmitAnswerRequest.builder()
+                .type(vo.getPendingStep().getType())
+                .chosen(List.of(vo.getPendingStep().getOptions().get(0).getOptionId()))
+                .build();
+        SessionVO after = examSessionService.submitAnswer(vo.getSessionId(), req, testUser3);
+
+        Assertions.assertEquals("FINISHED", after.getStatus(), "答完后应走完自动环节并结案");
+        Assertions.assertFalse(after.getImmediateResults().isEmpty());
+
+        System.out.println("✅ 自适应流程走完！最终状态: " + after.getStatus());
+        System.out.println("   总得分: " + after.getTotalScore());
     }
 }

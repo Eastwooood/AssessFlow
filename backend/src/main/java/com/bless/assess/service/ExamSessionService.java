@@ -33,9 +33,11 @@ public class ExamSessionService {
     private final PaperTemplateConfMapper paperTemplateConfMapper;
     private final QuestionBlacklistConfMapper blacklistMapper;
     private final GradingService gradingService;
+    private final QuestionTypeConfService questionTypeConfService;
     private final StringRedisTemplate redisTemplate;
     private static final String SUBMIT_LOCK_PREFIX = "exam:submit:lock:";
     private static final int LOCK_TIMEOUT_SECONDS = 10;
+    private static final com.fasterxml.jackson.databind.ObjectMapper OM = new com.fasterxml.jackson.databind.ObjectMapper();
     
     /**
      * 开考：创建会话并初始化步骤
@@ -75,6 +77,9 @@ public class ExamSessionService {
         // 6. 更新会话
         examSessionMapper.updateById(session);
         
+        // 7. 重新查询 steps（advanceExam 可能修改了 step 内容，如自适应即时抽题）
+        steps = sessionStepMapper.selectBySessionIdOrderByIndex(session.getId());
+        
         log.info("开考成功: sessionId={}, userId={}, paperId={}", session.getId(), userId, paperId);
         return buildSessionVO(session, steps);
     }
@@ -83,7 +88,7 @@ public class ExamSessionService {
      * 提交答案（带分布式锁防重复提交）
      */
     @Transactional
-    public SessionVO submitAnswer(Long sessionId, SubmitAnswerRequest request) {
+    public SessionVO submitAnswer(Long sessionId, SubmitAnswerRequest request, Long operatorUserId) {
         // 1. 加分布式锁（使用stepCursor作为幂等键的一部分）
         String lockKey = SUBMIT_LOCK_PREFIX + sessionId;
         Boolean locked = redisTemplate.opsForValue().setIfAbsent(lockKey, "1", LOCK_TIMEOUT_SECONDS, TimeUnit.SECONDS);
@@ -97,6 +102,9 @@ public class ExamSessionService {
             if (session == null) {
                 throw new BusinessException("SESSION_NOT_FOUND", "会话不存在");
             }
+            if (!session.getUserId().equals(operatorUserId)) {
+                throw new BusinessException("FORBIDDEN", "无权操作他人会话");
+            }
             
             // 前置校验三连
             if (!SessionStatus.AWAIT_ANSWER.name().equals(session.getStatus())) {
@@ -109,7 +117,12 @@ public class ExamSessionService {
             }
             
             SessionStep currentStep = steps.get(session.getStepCursor());
-            
+
+            // 幂等：已结算则直接返回快照，不再二次评分
+            if (Boolean.TRUE.equals(currentStep.getSettled())) {
+                return buildSessionVO(session, steps);
+            }
+
             // 校验题型一致性
             if (!request.getType().equals(currentStep.getType())) {
                 throw new BusinessException("TYPE_MISMATCH", "提交的题型与当前环节不匹配");
@@ -134,9 +147,11 @@ public class ExamSessionService {
             double gotScore = gradingService.grade(request.getType(), correctAnswers, chosenAnswers);
             
             // 4. 更新步骤状态
-            currentStep.setUserAnswer(com.fasterxml.jackson.core.type.TypeReference.defaultInstance()
-                    .getType().toString());  // 简化处理，实际应序列化chosenAnswers
-            currentStep.setUserAnswer(chosenAnswers.toString());
+            try {
+                currentStep.setUserAnswer(OM.writeValueAsString(chosenAnswers));
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                throw new BusinessException("SERIALIZE_ERROR", "答案序列化失败");
+            }
             currentStep.setGotScore(gotScore);
             currentStep.setSettled(true);
             sessionStepMapper.updateById(currentStep);
@@ -163,10 +178,13 @@ public class ExamSessionService {
     /**
      * 查询会话快照（断线续考用）
      */
-    public SessionVO getSessionSnapshot(Long sessionId) {
+    public SessionVO getSessionSnapshot(Long sessionId, Long operatorUserId) {
         ExamSession session = examSessionMapper.selectById(sessionId);
         if (session == null) {
             throw new BusinessException("SESSION_NOT_FOUND", "会话不存在");
+        }
+        if (!session.getUserId().equals(operatorUserId)) {
+            throw new BusinessException("FORBIDDEN", "无权操作他人会话");
         }
         
         List<SessionStep> steps = sessionStepMapper.selectBySessionIdOrderByIndex(sessionId);
@@ -183,7 +201,13 @@ public class ExamSessionService {
         while (session.getStepCursor() < steps.size()) {
             SessionStep step = steps.get(session.getStepCursor());
             StepType stepType = StepType.valueOf(step.getType());
-            
+
+            // P0 修复：已结算的作答步直接前移游标，避免对同一题重复进入 AWAIT_ANSWER
+            if (!stepType.isAutoStep() && Boolean.TRUE.equals(step.getSettled())) {
+                session.setStepCursor(session.getStepCursor() + 1);
+                continue;
+            }
+
             if (stepType.isAutoStep()) {
                 // 自动环节：就地结算、cursor+1
                 step.setSettled(true);
@@ -204,7 +228,11 @@ public class ExamSessionService {
                             step.setQuestionId(newQuestion.getId());
                             // 重新打乱候选选项
                             Set<Long> newCandidates = shuffleAndExtractOptionIds(newQuestion);
-                            step.setCandidateOptions(newCandidates.toString());
+                            try {
+                                step.setCandidateOptions(OM.writeValueAsString(new ArrayList<>(newCandidates)));
+                            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                                throw new BusinessException("SERIALIZE_ERROR", "候选选项序列化失败");
+                            }
                             sessionStepMapper.updateById(step);
                             log.info("回退重抽成功: newQuestionId={}, sessionId={}", newQuestion.getId(), session.getId());
                         } else {
@@ -221,8 +249,21 @@ public class ExamSessionService {
                     if (adaptiveQuestion != null) {
                         step.setQuestionId(adaptiveQuestion.getId());
                         Set<Long> candidates = shuffleAndExtractOptionIds(adaptiveQuestion);
-                        step.setCandidateOptions(candidates.toString());
+                        try {
+                            step.setCandidateOptions(OM.writeValueAsString(new ArrayList<>(candidates)));
+                        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                            throw new BusinessException("SERIALIZE_ERROR", "候选选项序列化失败");
+                        }
                         sessionStepMapper.updateById(step);
+                        log.info("即时roll抽题成功: stepIndex={}, questionId={}, sessionId={}",
+                                step.getStepIndex(), adaptiveQuestion.getId(), session.getId());
+                    } else {
+                        // 兜底：抽不到题则结算跳过，避免卡在无题的 AWAIT_ANSWER
+                        log.error("即时roll无可用题，跳过: sessionId={}, stepIndex={}", session.getId(), step.getStepIndex());
+                        step.setSettled(true);
+                        sessionStepMapper.updateById(step);
+                        session.setStepCursor(session.getStepCursor() + 1);
+                        continue;
                     }
                 }
                 
@@ -242,6 +283,26 @@ public class ExamSessionService {
         }
     }
     
+    /**
+     * 用户主动放弃会话
+     */
+    @Transactional
+    public SessionVO abandon(Long sessionId, Long operatorUserId) {
+        ExamSession s = examSessionMapper.selectById(sessionId);
+        if (s == null) throw new BusinessException("SESSION_NOT_FOUND", "会话不存在");
+        if (!s.getUserId().equals(operatorUserId))
+            throw new BusinessException("FORBIDDEN", "无权操作他人会话");
+        if (SessionStatus.FINISHED.name().equals(s.getStatus())
+                || SessionStatus.ABANDONED.name().equals(s.getStatus())) {
+            throw new BusinessException("STATUS_ERROR", "会话已结束，无法放弃");
+        }
+        s.setStatus(SessionStatus.ABANDONED.name());
+        s.setUpdatedAt(LocalDateTime.now());
+        examSessionMapper.updateById(s);
+        log.warn("会话主动放弃: sessionId={}, userId={}", sessionId, operatorUserId);
+        return getSessionSnapshot(sessionId, operatorUserId);
+    }
+
     /**
      * GM后台：强制跳转到指定环节
      */
@@ -295,15 +356,14 @@ public class ExamSessionService {
         examSessionMapper.updateById(session);
         
         log.warn("GM强制交卷: sessionId={}", sessionId);
-        return getSessionSnapshot(sessionId);
+        return getSessionSnapshot(sessionId, session.getUserId());
     }
     
     // ==================== 私有辅助方法 ====================
     
     private List<Map<String, Object>> parseStepSequence(String json) {
         try {
-            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            return mapper.readValue(json, 
+            return OM.readValue(json,
                     new com.fasterxml.jackson.core.type.TypeReference<List<Map<String, Object>>>() {});
         } catch (Exception e) {
             throw new BusinessException("TEMPLATE_PARSE_ERROR", "试卷模板解析失败");
@@ -327,7 +387,7 @@ public class ExamSessionService {
                 int count = item.containsKey("questionCount") ? (Integer) item.get("questionCount") : 1;
                 
                 // 固定题：预生成候选选项
-                if (!isAdaptive(type)) {
+                if (!isAdaptive(item)) {
                     List<QuestionBank> questions = questionBankMapper.randomSelectByType(typeStr, count);
                     Set<Long> blacklistedIds = blacklistMapper.selectAllBlacklistedIds();
                     
@@ -336,7 +396,11 @@ public class ExamSessionService {
                         
                         // 打乱候选选项
                         Set<Long> candidateIds = shuffleAndExtractOptionIds(q);
-                        step.setCandidateOptions(candidateIds.toString());
+                        try {
+                            step.setCandidateOptions(OM.writeValueAsString(new ArrayList<>(candidateIds)));
+                        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                            throw new BusinessException("SERIALIZE_ERROR", "候选选项序列化失败");
+                        }
                         steps.add(step);
                     }
                 } else {
@@ -368,8 +432,7 @@ public class ExamSessionService {
             return Collections.emptySet();
         }
         try {
-            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            return new HashSet<>(mapper.readValue(json, 
+            return new HashSet<>(OM.readValue(json,
                     new com.fasterxml.jackson.core.type.TypeReference<List<Long>>() {}));
         } catch (Exception e) {
             return Collections.emptySet();
@@ -381,8 +444,7 @@ public class ExamSessionService {
             return Collections.emptySet();
         }
         try {
-            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            return new HashSet<>(mapper.readValue(json, 
+            return new HashSet<>(OM.readValue(json,
                     new com.fasterxml.jackson.core.type.TypeReference<List<Long>>() {}));
         } catch (Exception e) {
             return Collections.emptySet();
@@ -391,16 +453,17 @@ public class ExamSessionService {
     
     private Set<Long> shuffleAndExtractOptionIds(QuestionBank question) {
         try {
-            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            List<Map<String, Object>> options = mapper.readValue(question.getOptions(),
+            List<Map<String, Object>> options = OM.readValue(question.getOptions(),
                     new com.fasterxml.jackson.core.type.TypeReference<List<Map<String, Object>>>() {});
             
             List<Long> optionIds = options.stream()
                     .map(o -> ((Number) o.get("optionId")).longValue())
                     .collect(Collectors.toList());
             
-            // 服务端打乱
-            Collections.shuffle(optionIds);
+            // 按题型配置决定是否打乱
+            if (questionTypeConfService.shouldShuffle(question.getQuestionType())) {
+                Collections.shuffle(optionIds);
+            }
             return new LinkedHashSet<>(optionIds);
         } catch (Exception e) {
             log.error("解析选项失败: questionId={}", question.getId(), e);
@@ -429,9 +492,9 @@ public class ExamSessionService {
         return candidates.isEmpty() ? null : candidates.get(0);
     }
     
-    private boolean isAdaptive(StepType type) {
-        // 可根据配置扩展自适应题型判断逻辑
-        return false;  // 目前默认都是固定题
+    private boolean isAdaptive(Map<String, Object> item) {
+        Object v = item.get("adaptive");
+        return v instanceof Boolean ? (Boolean) v : Boolean.parseBoolean(String.valueOf(v));
     }
     
     private QuestionBank selectAdaptiveQuestion(String type, double correctRate, Set<Long> blacklistedIds) {
@@ -524,8 +587,7 @@ public class ExamSessionService {
     
     private List<SessionVO.PendingStep.OptionVO> extractSafeOptions(QuestionBank question) {
         try {
-            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-            List<Map<String, Object>> options = mapper.readValue(question.getOptions(),
+            List<Map<String, Object>> options = OM.readValue(question.getOptions(),
                     new com.fasterxml.jackson.core.type.TypeReference<List<Map<String, Object>>>() {});
             
             return options.stream()

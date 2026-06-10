@@ -20,6 +20,15 @@ spring:
       write-dates-as-timestamps: false
     default-property-inclusion: non_null
 
+jwt:
+  secret: ${JWT_SECRET:assess-flow-please-change-this-secret-at-least-32-bytes}
+  expire-minutes: 120
+
+assess:
+  session:
+    timeout-minutes: 30
+    scan-ms: 60000
+
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml
   type-aliases-package: com.bless.assess.entity

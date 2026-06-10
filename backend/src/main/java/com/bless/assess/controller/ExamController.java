@@ -1,10 +1,9 @@
 package com.bless.assess.controller;
 
-import com.bless.assess.dto.SubmitAnswerRequest;
 import com.bless.assess.service.ExamSessionService;
+import com.bless.assess.util.SecurityUtil;
 import com.bless.assess.vo.ApiResult;
 import com.bless.assess.vo.SessionVO;
-import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
@@ -15,16 +14,15 @@ import org.springframework.web.bind.annotation.*;
 @RequestMapping("/exams")
 @RequiredArgsConstructor
 public class ExamController {
-    
+
     private final ExamSessionService examSessionService;
-    
+
     /**
      * 开考：创建考试会话
      */
     @PostMapping("/{paperId}/sessions")
-    public ApiResult<SessionVO> startExam(
-            @PathVariable Long paperId,
-            @RequestParam(defaultValue = "1") Long userId) {
+    public ApiResult<SessionVO> startExam(@PathVariable Long paperId) {
+        Long userId = SecurityUtil.currentUserId();
         SessionVO vo = examSessionService.startExam(userId, paperId);
         return ApiResult.success(vo);
     }

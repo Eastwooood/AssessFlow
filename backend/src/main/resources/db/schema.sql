@@ -159,10 +159,37 @@ INSERT INTO `question_bank` (`id`, `stem`, `question_type`, `options`, `correct_
 
 -- 插入示例试卷模板（INFO → 3道单选 → SCORE_SNAPSHOT → 2道多选 → 1道判断）
 INSERT INTO `paper_template_conf` (`id`, `paper_name`, `step_sequence`, `enabled`, `created_at`, `updated_at`) VALUES
-(1, '综合能力测评卷', 
+(1, '综合能力测评卷',
  '[{"type":"INFO","title":"欢迎参加本次测评"},{"type":"SINGLE","questionCount":3},
    {"type":"SCORE_SNAPSHOT","title":"当前得分"},{"type":"MULTI","questionCount":2},
    {"type":"JUDGE","questionCount":1}]',
+ 1, NOW(), NOW()),
+(2, '自适应能力测评卷',
+ '[{"type":"INFO","title":"欢迎参加自适应测评"},{"type":"SINGLE","questionCount":1,"adaptive":true},
+   {"type":"SCORE_SNAPSHOT","title":"当前得分"}]',
  1, NOW(), NOW());
+
+-- 补充一道难度3的单选题（即时roll自适应初始correctRate=0.5 → 难度3）
+INSERT INTO `question_bank` (`id`, `stem`, `question_type`, `options`, `correct_answer`, `difficulty`, `tags`, `enabled`, `created_at`, `updated_at`) VALUES
+(1004, '以下哪个设计模式属于创建型模式？', 'SINGLE',
+ '[{"optionId":1,"text":"工厂模式","isCorrect":true},{"optionId":2,"text":"观察者模式","isCorrect":false},{"optionId":3,"text":"策略模式","isCorrect":false},{"optionId":4,"text":"装饰器模式","isCorrect":false}]',
+ '[1]', 3, '["设计模式","创建型"]', 1, NOW(), NOW());
+
+-- 8. 系统用户表（JWT鉴权）
+DROP TABLE IF EXISTS `sys_user`;
+CREATE TABLE `sys_user` (
+    `id` BIGINT NOT NULL COMMENT '主键ID',
+    `username` VARCHAR(64) NOT NULL COMMENT '用户名',
+    `password` VARCHAR(128) NOT NULL COMMENT 'BCrypt加密密码',
+    `role` VARCHAR(32) NOT NULL DEFAULT 'USER' COMMENT 'USER/ADMIN',
+    `created_at` DATETIME NOT NULL,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_username` (`username`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='系统用户';
+
+-- 密码均为 123456 的 BCrypt 值（示例，实际应替换为真实哈希）
+INSERT INTO `sys_user` (`id`, `username`, `password`, `role`, `created_at`) VALUES
+(1, 'tester', '$2a$10$N.zmdr9k7uOCQb376NoUnuTJ8iAt6Z5EHsM8lE9lBOsl7iAt6Z5EO', 'USER', NOW()),
+(2, 'admin', '$2a$10$N.zmdr9k7uOCQb376NoUnuTJ8iAt6Z5EHsM8lE9lBOsl7iAt6Z5EO', 'ADMIN', NOW());
 
 SELECT '✅ AssessFlow 数据库初始化完成！' AS message;
