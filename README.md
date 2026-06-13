@@ -1,3 +1,4 @@
+```
 E:\JavaProject\BlessNode\AssessFlow\
 ├── backend/               # 后端工程（本次实现）
 │   ├── src/main/java/com/bless/assess/
@@ -16,3 +17,4 @@ E:\JavaProject\BlessNode\AssessFlow\
 ├── frontend/              # 前端工程（预留）
 ├── ai-engine/             # AI赋能工程（预留）
 └── docs/
+```
